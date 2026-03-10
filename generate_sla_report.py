@@ -3,7 +3,7 @@
 SLA Metrics Dashboard Generator
 
 Generates an HTML dashboard showing vulnerability management SLA compliance
-for Desktop, Infrastructure, and Network teams.
+by Division and Team (e.g., OIT Desktop, CID Desktop, RL Infrastructure, etc.)
 
 SLA Targets:
 - Critical: 7 business days
@@ -19,16 +19,42 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from collections import defaultdict
 
+try:
+    import openpyxl
+except ImportError:
+    print("Error: openpyxl is required. Install with: pip install openpyxl")
+    exit(1)
+
 # Configuration
 BASE_DIR = Path(__file__).parent
 REPORT_DATE = datetime.now()
 AGE_BUCKETS = [8, 16, 31, 91]  # Days
 
-# Team directory mappings
-TEAMS = {
-    "Desktop": "Desktop_Vulnerabilities",
-    "Infrastructure": "Infrastructure_Vulnerabilities",
-    "Network": "Network_Vulnerabilities"
+# Division + Team combinations to report on
+# Format: (display_name, division, team_keyword_in_boundaries)
+DIVISION_TEAMS = [
+    ("OIT Desktop", "OIT", "Desktop Team"),
+    ("CID Desktop", "CID", "Desktop Team"),
+    ("RL Desktop", "RL", "Desktop Team"),
+    ("OIT Infrastructure", "OIT", "Infrastructure Team"),
+    ("RL Infrastructure", "RL", "Infrastructure Team"),
+    ("OIT Network", "OIT", "Network Team"),
+    ("OIT Mobile", "OIT", "Mobile Devices Team"),
+]
+
+# Default data file - supports both xlsx and csv
+DATA_FILE_XLSX = BASE_DIR / "report_Enriched.xlsx"
+DATA_FILE_CSV = BASE_DIR / "report_Enriched.csv"
+DATA_SHEET = "report_Enriched"
+
+# CSV column names (matching xlsx headers)
+CSV_COLUMNS = {
+    'cve_uid': 'Vulnerability CVE UID',
+    'avm_rating': 'AVM Rating',
+    'status': 'Status',
+    'first_detected': 'First Detected',
+    'boundaries': 'Boundaries',
+    'division': 'Division',
 }
 
 # SLA targets in business days
@@ -37,12 +63,15 @@ SLA_TARGETS = {
     "HIGH": 14
 }
 
-
-def find_related_devices_file(team_dir: Path) -> Path | None:
-    """Find the Related Devices CSV file in a team directory."""
-    for file in team_dir.glob("Related Devices*.csv"):
-        return file
-    return None
+# Column indices in xlsx file (0-based)
+COLUMN_INDICES = {
+    'cve_uid': 0,           # Vulnerability CVE UID
+    'avm_rating': 4,        # AVM Rating
+    'status': 6,            # Status
+    'first_detected': 9,    # First Detected
+    'boundaries': 30,       # Boundaries
+    'division': 43,         # Division
+}
 
 
 def parse_date(date_str: str) -> datetime | None:
@@ -113,64 +142,127 @@ def get_bucket_color(bucket: str, criticality: str) -> str:
     return colors.get(bucket, "#6c757d")
 
 
-def parse_vulnerabilities(file_path: Path) -> list[dict]:
-    """Parse vulnerabilities from a Related Devices CSV file.
+def load_xlsx_data(file_path: Path, sheet_name: str) -> list[tuple]:
+    """Load data from xlsx file and return rows as tuples."""
+    wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    ws = wb[sheet_name]
 
+    rows = []
+    for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+        rows.append(row)
+
+    wb.close()
+    return rows
+
+
+def load_csv_data(file_path: Path) -> list[tuple]:
+    """Load data from CSV file and return rows as tuples matching xlsx column order."""
+    rows = []
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Build tuple in same order as xlsx columns (44 columns)
+            # Only the columns we need are at specific indices
+            row_data = [None] * 44
+            row_data[COLUMN_INDICES['cve_uid']] = row.get(CSV_COLUMNS['cve_uid'], '')
+            row_data[COLUMN_INDICES['avm_rating']] = row.get(CSV_COLUMNS['avm_rating'], '')
+            row_data[COLUMN_INDICES['status']] = row.get(CSV_COLUMNS['status'], '')
+            row_data[COLUMN_INDICES['first_detected']] = row.get(CSV_COLUMNS['first_detected'], '')
+            row_data[COLUMN_INDICES['boundaries']] = row.get(CSV_COLUMNS['boundaries'], '')
+            row_data[COLUMN_INDICES['division']] = row.get(CSV_COLUMNS['division'], '')
+            rows.append(tuple(row_data))
+
+    return rows
+
+
+def load_data() -> tuple[list[tuple], str]:
+    """Load data from xlsx or csv file. Returns (rows, filename)."""
+    if DATA_FILE_XLSX.exists():
+        return load_xlsx_data(DATA_FILE_XLSX, DATA_SHEET), DATA_FILE_XLSX.name
+    elif DATA_FILE_CSV.exists():
+        return load_csv_data(DATA_FILE_CSV), DATA_FILE_CSV.name
+    else:
+        return None, None
+
+
+def parse_vulnerabilities_for_division_team(
+    rows: list[tuple],
+    division: str,
+    team_keyword: str
+) -> list[dict]:
+    """Parse vulnerabilities from xlsx data for a specific division+team.
+
+    Filters by division and team (from Boundaries field).
     Deduplicates by CVE UID, using the earliest first detected date
     and considering a CVE as 'Open' if ANY instance is open.
     """
     # Track unique CVEs: {cve_uid: {data}}
     cve_tracker = {}
 
-    with open(file_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            try:
-                cve_uid = row.get('Vulnerability CVE UID', '').strip()
-                avm_rating = row.get('AVM Rating', '').strip().upper()
-                status = row.get('Status', '').strip()
-                first_detected_str = row.get('First Detected', '').strip()
+    for row in rows:
+        try:
+            # Get values from row
+            cve_uid = str(row[COLUMN_INDICES['cve_uid']] or '').strip()
+            avm_rating = str(row[COLUMN_INDICES['avm_rating']] or '').strip().upper()
+            status = str(row[COLUMN_INDICES['status']] or '').strip()
+            first_detected_val = row[COLUMN_INDICES['first_detected']]
+            boundaries = str(row[COLUMN_INDICES['boundaries']] or '').strip()
+            row_division = str(row[COLUMN_INDICES['division']] or '').strip()
 
-                # Skip if missing critical data
-                if not cve_uid or not avm_rating or not first_detected_str:
+            # Filter by division and team
+            if row_division != division:
+                continue
+            if team_keyword.lower() not in boundaries.lower():
+                continue
+
+            # Skip if missing critical data
+            if not cve_uid or not avm_rating:
+                continue
+
+            # Only include CRITICAL and HIGH
+            if avm_rating not in ['CRITICAL', 'HIGH']:
+                continue
+
+            # Parse date - handle both string and datetime objects
+            if isinstance(first_detected_val, datetime):
+                first_detected = first_detected_val
+            else:
+                first_detected_str = str(first_detected_val or '').strip()
+                if not first_detected_str:
                     continue
-
-                # Only include CRITICAL and HIGH
-                if avm_rating not in ['CRITICAL', 'HIGH']:
-                    continue
-
                 first_detected = parse_date(first_detected_str)
                 if not first_detected:
                     continue
 
-                # Normalize status
-                if 'open' in status.lower():
-                    normalized_status = 'Open'
-                elif 'remediat' in status.lower() or 'resolve' in status.lower() or 'closed' in status.lower():
-                    normalized_status = 'Remediated'
-                else:
-                    normalized_status = 'Open'  # Default to open if unclear
+            # Normalize status
+            if 'open' in status.lower():
+                normalized_status = 'Open'
+            elif 'remediat' in status.lower() or 'resolve' in status.lower() or 'closed' in status.lower():
+                normalized_status = 'Remediated'
+            else:
+                normalized_status = 'Open'  # Default to open if unclear
 
-                # Track unique CVEs
-                if cve_uid not in cve_tracker:
-                    cve_tracker[cve_uid] = {
-                        'cve_uid': cve_uid,
-                        'avm_rating': avm_rating,
-                        'status': normalized_status,
-                        'first_detected': first_detected,
-                        'instance_count': 1
-                    }
-                else:
-                    # Use earliest first detected date
-                    if first_detected < cve_tracker[cve_uid]['first_detected']:
-                        cve_tracker[cve_uid]['first_detected'] = first_detected
-                    # If ANY instance is Open, mark CVE as Open
-                    if normalized_status == 'Open':
-                        cve_tracker[cve_uid]['status'] = 'Open'
-                    cve_tracker[cve_uid]['instance_count'] += 1
+            # Track unique CVEs
+            if cve_uid not in cve_tracker:
+                cve_tracker[cve_uid] = {
+                    'cve_uid': cve_uid,
+                    'avm_rating': avm_rating,
+                    'status': normalized_status,
+                    'first_detected': first_detected,
+                    'instance_count': 1
+                }
+            else:
+                # Use earliest first detected date
+                if first_detected < cve_tracker[cve_uid]['first_detected']:
+                    cve_tracker[cve_uid]['first_detected'] = first_detected
+                # If ANY instance is Open, mark CVE as Open
+                if normalized_status == 'Open':
+                    cve_tracker[cve_uid]['status'] = 'Open'
+                cve_tracker[cve_uid]['instance_count'] += 1
 
-            except Exception as e:
-                continue  # Skip malformed rows
+        except Exception as e:
+            continue  # Skip malformed rows
 
     # Convert to list and calculate age buckets
     vulnerabilities = []
@@ -610,10 +702,10 @@ def generate_html_report(all_team_data: dict) -> str:
     # Add executive summary
     html += generate_summary_table(all_team_data)
 
-    # Add team tables
-    for team_name in ["Desktop", "Infrastructure", "Network"]:
-        if team_name in all_team_data:
-            html += generate_team_table(team_name, all_team_data[team_name])
+    # Add division+team tables
+    for display_name, _, _ in DIVISION_TEAMS:
+        if display_name in all_team_data:
+            html += generate_team_table(display_name, all_team_data[display_name])
 
     html += '''
         <footer>
@@ -635,39 +727,40 @@ def main():
     print(f"\nReport Date: {REPORT_DATE.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Base Directory: {BASE_DIR}\n")
 
+    # Load data from xlsx or csv
+    rows, filename = load_data()
+    if rows is None:
+        print(f"[ERROR] Data file not found. Expected one of:")
+        print(f"  - {DATA_FILE_XLSX}")
+        print(f"  - {DATA_FILE_CSV}")
+        return
+
+    print(f"Loading data from: {filename}")
+    print(f"Total rows loaded: {len(rows)}\n")
+
     all_team_data = {}
 
-    for team_name, team_dir_name in TEAMS.items():
-        team_dir = BASE_DIR / team_dir_name
+    for display_name, division, team_keyword in DIVISION_TEAMS:
+        print(f"Processing {display_name}...")
 
-        if not team_dir.exists():
-            print(f"[WARNING] Directory not found: {team_dir}")
-            continue
-
-        related_devices_file = find_related_devices_file(team_dir)
-
-        if not related_devices_file:
-            print(f"[WARNING] No Related Devices file found for {team_name}")
-            continue
-
-        print(f"Processing {team_name}...")
-        print(f"  File: {related_devices_file.name}")
-
-        vulnerabilities = parse_vulnerabilities(related_devices_file)
+        vulnerabilities = parse_vulnerabilities_for_division_team(rows, division, team_keyword)
         print(f"  Unique CVEs: {len(vulnerabilities)}")
 
-        aggregated = aggregate_data(vulnerabilities)
-        all_team_data[team_name] = aggregated
+        if vulnerabilities:
+            aggregated = aggregate_data(vulnerabilities)
+            all_team_data[display_name] = aggregated
 
-        # Print summary for this team
-        open_critical = sum(aggregated['Open']['CRITICAL'].values())
-        open_high = sum(aggregated['Open']['HIGH'].values())
-        print(f"  Open Critical: {open_critical}")
-        print(f"  Open High: {open_high}")
+            # Print summary for this division+team
+            open_critical = sum(aggregated['Open']['CRITICAL'].values())
+            open_high = sum(aggregated['Open']['HIGH'].values())
+            print(f"  Open Critical: {open_critical}")
+            print(f"  Open High: {open_high}")
+        else:
+            print("  No vulnerabilities found")
         print()
 
     if not all_team_data:
-        print("[ERROR] No team data found. Exiting.")
+        print("[ERROR] No data found. Exiting.")
         return
 
     # Generate HTML report
