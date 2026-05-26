@@ -223,20 +223,15 @@ def parse_vulnerabilities_for_division_team(
                 if not first_detected:
                     continue
 
-            # Normalize status
-            if 'open' in status.lower():
-                normalized_status = 'Open'
-            elif 'remediat' in status.lower() or 'resolve' in status.lower() or 'closed' in status.lower():
-                normalized_status = 'Remediated'
-            else:
-                normalized_status = 'Open'  # Default to open if unclear
+            # Skip remediated/resolved/closed rows — only track open CVEs
+            if 'remediat' in status.lower() or 'resolve' in status.lower() or 'closed' in status.lower():
+                continue
 
             # Track unique CVEs
             if cve_uid not in cve_tracker:
                 cve_tracker[cve_uid] = {
                     'cve_uid': cve_uid,
                     'avm_rating': avm_rating,
-                    'status': normalized_status,
                     'first_detected': first_detected,
                     'instance_count': 1
                 }
@@ -244,9 +239,6 @@ def parse_vulnerabilities_for_division_team(
                 # Use earliest first detected date
                 if first_detected < cve_tracker[cve_uid]['first_detected']:
                     cve_tracker[cve_uid]['first_detected'] = first_detected
-                # If ANY instance is Open, mark CVE as Open
-                if normalized_status == 'Open':
-                    cve_tracker[cve_uid]['status'] = 'Open'
                 cve_tracker[cve_uid]['instance_count'] += 1
 
         except Exception as e:
@@ -263,28 +255,22 @@ def parse_vulnerabilities_for_division_team(
 
 
 def aggregate_data(vulnerabilities: list[dict]) -> dict:
-    """Aggregate vulnerabilities by status, criticality, and age bucket."""
-    # Structure: {status: {criticality: {bucket: count}}}
+    """Aggregate open vulnerabilities by criticality and age bucket."""
     buckets = ["≤8", "9-16", "17-31", "32-91", ">91"]
 
     aggregated = {
         'Open': {
             'CRITICAL': {b: 0 for b in buckets},
             'HIGH': {b: 0 for b in buckets}
-        },
-        'Remediated': {
-            'CRITICAL': {b: 0 for b in buckets},
-            'HIGH': {b: 0 for b in buckets}
         }
     }
 
     for vuln in vulnerabilities:
-        status = vuln['status']
         criticality = vuln['avm_rating']
         bucket = vuln['age_bucket']
 
-        if status in aggregated and criticality in aggregated[status]:
-            aggregated[status][criticality][bucket] += 1
+        if criticality in aggregated['Open']:
+            aggregated['Open'][criticality][bucket] += 1
 
     return aggregated
 
@@ -300,7 +286,6 @@ def generate_team_table(team_name: str, data: dict) -> str:
         <table>
             <thead>
                 <tr>
-                    <th>Status</th>
                     <th>Criticality</th>
                     <th>SLA</th>
 '''
@@ -314,31 +299,28 @@ def generate_team_table(team_name: str, data: dict) -> str:
             <tbody>
 '''
 
-    for status in ['Open', 'Remediated']:
-        for criticality in ['CRITICAL', 'HIGH']:
-            sla = f"{SLA_TARGETS[criticality]} days"
-            row_data = data[status][criticality]
-            total = sum(row_data.values())
+    for criticality in ['CRITICAL', 'HIGH']:
+        sla = f"{SLA_TARGETS[criticality]} days"
+        row_data = data['Open'][criticality]
+        total = sum(row_data.values())
 
-            html += f'''                <tr>
-                    <td class="status-{status.lower()}">{status}</td>
+        html += f'''                <tr>
                     <td class="criticality-{criticality.lower()}">{criticality}</td>
                     <td>{sla}</td>
 '''
 
-            for bucket in buckets:
-                count = row_data[bucket]
-                color = get_bucket_color(bucket, criticality)
-                text_color = "#ffffff" if color in ["#212529", "#dc3545"] else "#000000"
+        for bucket in buckets:
+            count = row_data[bucket]
+            color = get_bucket_color(bucket, criticality)
+            text_color = "#ffffff" if color in ["#212529", "#dc3545"] else "#000000"
 
-                # Only color cells with values > 0
-                if count > 0:
-                    html += f'                    <td style="background-color: {color}; color: {text_color}; font-weight: bold;">{count}</td>\n'
-                else:
-                    html += f'                    <td class="zero-cell">0</td>\n'
+            if count > 0:
+                html += f'                    <td style="background-color: {color}; color: {text_color}; font-weight: bold;">{count}</td>\n'
+            else:
+                html += f'                    <td class="zero-cell">0</td>\n'
 
-            html += f'                    <td class="total-cell">{total}</td>\n'
-            html += '                </tr>\n'
+        html += f'                    <td class="total-cell">{total}</td>\n'
+        html += '                </tr>\n'
 
     html += '''            </tbody>
         </table>
@@ -353,15 +335,13 @@ def generate_summary_table(all_team_data: dict) -> str:
 
     # Aggregate across all teams
     summary = {
-        'Open': {'CRITICAL': {b: 0 for b in buckets}, 'HIGH': {b: 0 for b in buckets}},
-        'Remediated': {'CRITICAL': {b: 0 for b in buckets}, 'HIGH': {b: 0 for b in buckets}}
+        'Open': {'CRITICAL': {b: 0 for b in buckets}, 'HIGH': {b: 0 for b in buckets}}
     }
 
     for team_data in all_team_data.values():
-        for status in ['Open', 'Remediated']:
-            for criticality in ['CRITICAL', 'HIGH']:
-                for bucket in buckets:
-                    summary[status][criticality][bucket] += team_data[status][criticality][bucket]
+        for criticality in ['CRITICAL', 'HIGH']:
+            for bucket in buckets:
+                summary['Open'][criticality][bucket] += team_data['Open'][criticality][bucket]
 
     # Calculate key metrics
     total_open_critical = sum(summary['Open']['CRITICAL'].values())
@@ -602,7 +582,7 @@ def generate_html_report(all_team_data: dict) -> str:
             font-size: 13px;
         }}
 
-        th:first-child, th:nth-child(2), th:nth-child(3) {{
+        th:first-child, th:nth-child(2) {{
             text-align: left;
         }}
 
@@ -612,18 +592,8 @@ def generate_html_report(all_team_data: dict) -> str:
             border-bottom: 1px solid #e0e0e0;
         }}
 
-        td:first-child, td:nth-child(2), td:nth-child(3) {{
+        td:first-child, td:nth-child(2) {{
             text-align: left;
-        }}
-
-        .status-open {{
-            color: #dc3545;
-            font-weight: 600;
-        }}
-
-        .status-remediated {{
-            color: #28a745;
-            font-weight: 600;
         }}
 
         .criticality-critical {{
