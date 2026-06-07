@@ -3,7 +3,8 @@
 SLA Metrics Dashboard Generator
 
 Generates an HTML dashboard showing vulnerability management SLA compliance
-by Division and Team (e.g., OIT Desktop, CID Desktop, RL Infrastructure, etc.)
+by Division and Team (e.g., OIT Desktop, CID Desktop, OIT Open Systems Servers,
+OIT Windows Servers, RL Infrastructure, etc.)
 
 SLA Targets:
 - Critical: 7 business days
@@ -36,11 +37,13 @@ DIVISION_TEAMS = [
     ("OIT Desktop", "OIT", "Desktop Team"),
     ("CID Desktop", "CID", "Desktop Team"),
     ("RL Desktop", "RL", "Desktop Team"),
-    ("OIT Infrastructure", "OIT", "Infrastructure Team"),
+    ("OIT Open Systems Servers", "OIT", "Open Systems Team"),
+    ("OIT Windows Servers", "OIT", "Windows Team"),
     ("RL Infrastructure", "RL", "Infrastructure Team"),
     ("OIT Network", "OIT", "Network Team"),
     ("OIT Mobile", "OIT", "Mobile Devices Team"),
 ]
+
 
 # Default data file - supports both xlsx and csv
 DATA_FILE_XLSX = BASE_DIR / "report_Enriched.xlsx"
@@ -559,13 +562,11 @@ def generate_html_report(all_team_data: dict) -> str:
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
         }}
 
-        .team-card h2 {{
+        .team-card h2 {
             color: #1a237e;
             margin-bottom: 20px;
             font-size: 20px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #e0e0e0;
-        }}
+        }
 
         table {{
             width: 100%;
