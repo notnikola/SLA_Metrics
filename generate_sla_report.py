@@ -562,11 +562,11 @@ def generate_html_report(all_team_data: dict) -> str:
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
         }}
 
-        .team-card h2 {
+        .team-card h2 {{
             color: #1a237e;
             margin-bottom: 20px;
             font-size: 20px;
-        }
+        }}
 
         table {{
             width: 100%;
